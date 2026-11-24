@@ -1,36 +1,151 @@
-# This is a basic workflow to help you get started with Actions
+name: RDP
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions: write-all
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Configure Core RDP Settings
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                           -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Set Password for Main GitHub User (runneradmin)
+        run: |
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg) -replace 'PasswordComplexity = 1', 'PasswordComplexity = 0' | Set-Content C:\secpol.cfg
+          (Get-Content C:\secpol.cfg) -replace 'MinimumPasswordLength = \d+', 'MinimumPasswordLength = 0' | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          Remove-Item C:\secpol.cfg -Force
+
+          $username = "runneradmin"
+          $password = "1"
+         
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          Set-LocalUser -Name $username -Password $securePass
+         
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+         
+          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Apply Anti-Sleep Settings
+        run: |
+          powercfg -change -monitor-timeout-ac 0
+          powercfg -change -monitor-timeout-dc 0
+          powercfg -change -standby-timeout-ac 0
+          powercfg -change -standby-timeout-dc 0
+          powercfg -h off
+
+      - name: Install Browser Extensions
+        run: |
+          $chromePath = "HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist"
+          if (-not (Test-Path $chromePath)) { New-Item -Path $chromePath -Force | Out-Null }
+          New-ItemProperty -Path $chromePath -Name "1" -Value "lfkgcfakbpblpflbjanpoaipofoodnen;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path $chromePath -Name "2" -Value "majdfhpaihoncoakbjgbdhglocklcgno;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+         
+          $edgePath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist"
+          if (-not (Test-Path $edgePath)) { New-Item -Path $edgePath -Force | Out-Null }
+          New-ItemProperty -Path $edgePath -Name "1" -Value "pciakllldcajllepkbbihkmfkikheffb;https://edge.microsoft.com/extensionwebstorebase/v1/crx" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path $edgePath -Name "2" -Value "gmgoamodcdcjnbaobigkjelfplakmdhh;https://edge.microsoft.com/extensionwebstorebase/v1/crx" -PropertyType String -Force | Out-Null
+
+      - name: Install Macro Recorder & AnyDesk
+        shell: pwsh
+        run: |
+          $desktopPath = "C:\Users\Public\Desktop"
+          $rarPath = "$desktopPath\ahmad.rar"
+          $extractPath = "$desktopPath\ahmad_extracted"
+         
+          $directUrl = "https://drive.usercontent.google.com/download?id=1L4T-6L0j6AEsJYzvsXl14C7Q1Gp4c51a&export=download&authuser=0"
+         
+          Write-Host "Downloading Macro Recorder..."
+          Invoke-WebRequest -Uri $directUrl -OutFile $rarPath
+         
+          if (Test-Path $rarPath) { & "C:\Program Files\7-Zip\7z.exe" x $rarPath -o"$extractPath" -y }
+         
+          Write-Host "Installing Macro Recorder Setup..."
+          $installerPath = "$extractPath\MacroRecorderSetup.exe"
+          if (Test-Path $installerPath) {
+              Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/quiet", "/NORESTART" -Wait
+          }
+
+          Write-Host "Registering Macro Recorder in Registry..."
+          $regPath = "HKCU:\SOFTWARE\Jitbit\Macro Recorder"
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+          $serialKey = "HGCNNGujba4SdhQELI56YkubWcJe4MMhOw6mrqdA3WdWKp63lGmQgQSw"
+          New-ItemProperty -Path $regPath -Name "Email" -Value "1" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path $regPath -Name "Code" -Value $serialKey -PropertyType String -Force | Out-Null
+
+          Write-Host "Downloading and Installing AnyDesk..."
+          $anydeskUrl = "https://download.anydesk.com/AnyDesk.exe"
+          $anydeskPath = "$env:TEMP\AnyDesk.exe"
+         
+          Invoke-WebRequest -Uri $anydeskUrl -OutFile $anydeskPath
+         
+          Start-Process -FilePath $anydeskPath -ArgumentList "--install", "C:\AnyDesk", "--silent", "--create-desktop-icon" -Wait
+         
+          Start-Sleep -Seconds 10
+         
+          Write-Host "Setting AnyDesk Password for Unattended Access..."
+          cmd.exe /c "echo 1233aassA@ | C:\AnyDesk\AnyDesk.exe --set-password"
+         
+          Write-Host "Getting AnyDesk ID..."
+          $anydeskId = cmd.exe /c "C:\AnyDesk\AnyDesk.exe --get-id"
+          echo "ANYDESK_ID=$anydeskId" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.AMJAD_SECRET }} --hostname=ahmad --accept-routes
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection failed"; exit 1 }
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== CONNECTION INFO ==="
+          Write-Host "RDP Address: $env:TAILSCALE_IP"
+          Write-Host "RDP Username: runneradmin"
+          Write-Host "RDP Password: 1"
+          Write-Host "-----------------------"
+          Write-Host "AnyDesk ID: $env:ANYDESK_ID"
+          Write-Host "AnyDesk Pass: 1233aassA@"
+          Write-Host "=======================`n"
+         
+          for ($i = 0; $i -lt 71; $i++) {
+              Write-Host "[$(Get-Date)] RDP & AnyDesk Active"
+              Start-Sleep -Seconds 300
+          }
